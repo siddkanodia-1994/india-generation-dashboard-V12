@@ -108,6 +108,27 @@ function asFiniteNumber(v: unknown): number | null {
 }
 
 // ----------------------
+// Dynamic Y-axis domain helper (NEW)
+// ----------------------
+
+function computeDomain(values: Array<number | null | undefined>, padPct = 0.05, minAbsPad = 1) {
+  const nums = values.filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (!nums.length) return undefined;
+
+  let min = Math.min(...nums);
+  let max = Math.max(...nums);
+
+  if (min === max) {
+    const pad = Math.max(minAbsPad, Math.abs(min) * padPct);
+    return [min - pad, max + pad] as [number, number];
+  }
+
+  const range = max - min;
+  const pad = Math.max(minAbsPad, range * padPct);
+  return [min - pad, max + pad] as [number, number];
+}
+
+// ----------------------
 // Aggregation + growth
 // ----------------------
 
@@ -175,7 +196,7 @@ type DailyChartPoint = {
   units: number;
   prev_year_units: number | null;
   yoy_pct: number | null;
-  mom_pct: number | null; // weekly: WoW%, monthly: MoM%
+  mom_pct: number | null;
 };
 
 // ----------------------
@@ -187,16 +208,12 @@ function computeKPIs(sortedDaily: DailyPoint[]) {
     return {
       latest: null as DailyPoint | null,
       latestYoY: null as number | null,
-
       avg7: null as number | null,
       avg7YoY: null as number | null,
-
       avg30: null as number | null,
       avg30YoY: null as number | null,
-
       ytdTotal: null as number | null,
       ytdYoY: null as number | null,
-
       mtdAvg: null as number | null,
       mtdYoY: null as number | null,
     };
@@ -505,11 +522,11 @@ export type ElectricityDashboardProps = {
   type: "generation" | "demand" | "supply";
   title: string;
   subtitle: string;
-  seriesLabel: string; // e.g., "Generation", "Demand", "Supply"
-  unitLabel: string; // e.g., "units / MU"
-  valueColumnKey: string; // e.g., generation_gwh, demand_gwh, supply_gwh
-  defaultCsvPath?: string; // default: /data/<type>.csv
-  enableAutoFetch?: boolean; // default: true for generation
+  seriesLabel: string;
+  unitLabel: string;
+  valueColumnKey: string;
+  defaultCsvPath?: string;
+  enableAutoFetch?: boolean;
 };
 
 export default function ElectricityDashboard(props: ElectricityDashboardProps) {
@@ -526,7 +543,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
   const STORAGE_KEY = `tusk_india_${type}_v1`;
 
-  // Keep local edits in localStorage, but CSV will be baseline each load
   const [dataMap, setDataMap] = useState<Map<string, number>>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -559,21 +575,18 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [rangeDays, setRangeDays] = useState(120);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
 
-  // Slicer controls for the top chart
   const [fromIso, setFromIso] = useState("");
   const [toIso, setToIso] = useState("");
   const [aggFreq, setAggFreq] = useState<"daily" | "weekly" | "monthly" | "rolling30">("daily");
 
-  // Series toggles
-  const [showUnitsSeries, setShowUnitsSeries] = useState(true); // Total Current
-  const [showPrevYearSeries, setShowPrevYearSeries] = useState(true); // Total (previous year)
-  const [showYoYSeries, setShowYoYSeries] = useState(true); // YoY %
-  const [showMoMSeries, setShowMoMSeries] = useState(true); // MoM % / WoW %
+  const [showUnitsSeries, setShowUnitsSeries] = useState(true);
+  const [showPrevYearSeries, setShowPrevYearSeries] = useState(true);
+  const [showYoYSeries, setShowYoYSeries] = useState(true);
+  const [showMoMSeries, setShowMoMSeries] = useState(true);
   const [showControlLines, setShowControlLines] = useState(false);
 
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Update document title per tab/dashboard
   useEffect(() => {
     document.title = title;
   }, [title]);
@@ -624,7 +637,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     };
   }, [defaultCsvPath, type, valueColumnKey]);
 
-  // Persist local edits
   useEffect(() => {
     const obj = Object.fromEntries(dataMap.entries());
     localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
@@ -636,7 +648,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       .sort((a, b) => sortISO(a.date, b.date));
   }, [dataMap]);
 
-  // Initialize slicer to sensible default after data loads
   useEffect(() => {
     if (!sortedDaily.length) return;
     const lastIso = sortedDaily[sortedDaily.length - 1].date;
@@ -644,7 +655,6 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     if (!fromIso) setFromIso(isoMinusDays(lastIso, clamp(rangeDays, 7, 3650)));
   }, [sortedDaily, toIso, fromIso, rangeDays]);
 
-  // Build top chart data for selected range/frequency
   const dailyForChart = useMemo<DailyChartPoint[]>(() => {
     if (!sortedDaily.length) return [];
 
@@ -921,8 +931,49 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     }));
   }, [dailyForChart, showControlLines, controlStatsLeft, controlStatsYoY]);
 
-  const anyTotalsShown = showUnitsSeries || showPrevYearSeries || (showControlLines && !!controlStatsLeft);
-  const anyPctShown = showYoYSeries || showMoMSeries || (showControlLines && !!controlStatsYoY);
+  // NEW: dynamic domains for axes based on visible data
+  const leftAxisDomain = useMemo(() => {
+    if (!dailyForChartWithControl?.length) return undefined;
+
+    const vals: Array<number | null> = [];
+
+    if (showUnitsSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.units));
+    if (showPrevYearSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.prev_year_units));
+
+    if (showControlLines) {
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__mean_units));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p1_units));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p2_units));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m1_units));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m2_units));
+    }
+
+    return computeDomain(vals, 0.05, 5);
+  }, [dailyForChartWithControl, showUnitsSeries, showPrevYearSeries, showControlLines]);
+
+  const rightAxisDomain = useMemo(() => {
+    if (!dailyForChartWithControl?.length) return undefined;
+
+    const vals: Array<number | null> = [];
+
+    if (showYoYSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.yoy_pct));
+    if (showMoMSeries) vals.push(...(dailyForChartWithControl as any[]).map((d) => d.mom_pct));
+
+    if (showControlLines) {
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__mean_yoy));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p1_yoy));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__p2_yoy));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m1_yoy));
+      vals.push(...(dailyForChartWithControl as any[]).map((d) => d.__m2_yoy));
+    }
+
+    return computeDomain(vals, 0.05, 1);
+  }, [dailyForChartWithControl, showYoYSeries, showMoMSeries, showControlLines]);
+
+  const anyTotalsShown =
+    showUnitsSeries || showPrevYearSeries || (showControlLines && !!controlStatsLeft);
+  const anyPctShown =
+    showYoYSeries || showMoMSeries || (showControlLines && !!controlStatsYoY);
 
   const monthly = useMemo(() => toMonthly(sortedDaily), [sortedDaily]);
 
@@ -1030,8 +1081,9 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     setFetchStatus(`Fetching for ${ddmmyyyy}...`);
 
     try {
-      // Keep your existing endpoint behavior; optionally you can add kind=type later on backend
-      const res = await fetch(`/api/cea/daily?date=${encodeURIComponent(ddmmyyyy)}&kind=${encodeURIComponent(type)}`);
+      const res = await fetch(
+        `/api/cea/daily?date=${encodeURIComponent(ddmmyyyy)}&kind=${encodeURIComponent(type)}`
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = await res.json();
 
@@ -1179,7 +1231,11 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                   sub={kpis.latest ? `${fmtNum(kpis.latest.value)} units` : null}
                 />
 
-                <Stat label="Latest YoY (same day)" value={fmtPct(kpis.latestYoY, 2)} sub="vs same date last year (if available)" />
+                <Stat
+                  label="Latest YoY (same day)"
+                  value={fmtPct(kpis.latestYoY, 2)}
+                  sub="vs same date last year (if available)"
+                />
 
                 <Stat
                   label="Current 7-Day Average Units"
@@ -1282,44 +1338,57 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               <div className="text-sm text-slate-600">Add data to see the daily chart.</div>
             ) : (
               <>
-                <div className="mb-3 rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200">
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:items-end">
-                    <div>
-                      <div className="text-xs font-medium text-slate-600">From</div>
-                      <input
-                        type="date"
-                        value={fromIso}
-                        onChange={(e) => setFromIso(e.target.value)}
-                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                      />
-                      <div className="mt-1 text-[11px] text-slate-500">{fromIso ? formatDDMMYYYY(fromIso) : ""}</div>
+                {/* ====== UPDATED CONTROLS LAYOUT (removes blank space) ====== */}
+                <div className="mb-3 rounded-2xl bg-slate-50 p-2 ring-1 ring-slate-200">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
+                    {/* Left controls: From / To / View as */}
+                    <div className="flex-1">
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <div className="text-xs font-medium text-slate-600">From</div>
+                          <input
+                            type="date"
+                            value={fromIso}
+                            onChange={(e) => setFromIso(e.target.value)}
+                            className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                          />
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            {fromIso ? formatDDMMYYYY(fromIso) : ""}
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="text-xs font-medium text-slate-600">To</div>
+                          <input
+                            type="date"
+                            value={toIso}
+                            onChange={(e) => setToIso(e.target.value)}
+                            className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                          />
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            {toIso ? formatDDMMYYYY(toIso) : ""}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3">
+                        <div className="text-xs font-medium text-slate-600">View as</div>
+                        <select
+                          value={aggFreq}
+                          onChange={(e) => setAggFreq(e.target.value as any)}
+                          className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                        >
+                          <option value="daily">Daily</option>
+                          <option value="weekly">Weekly (sum)</option>
+                          <option value="monthly">Monthly (sum)</option>
+                          <option value="rolling30">Last 30 Days Rolling Sum (YoY Growth)</option>
+                        </select>
+                      </div>
                     </div>
 
-                    <div>
-                      <div className="text-xs font-medium text-slate-600">To</div>
-                      <input
-                        type="date"
-                        value={toIso}
-                        onChange={(e) => setToIso(e.target.value)}
-                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                      />
-                      <div className="mt-1 text-[11px] text-slate-500">{toIso ? formatDDMMYYYY(toIso) : ""}</div>
-                    </div>
-
-                    <div>
-                      <div className="text-xs font-medium text-slate-600">View as</div>
-                      <select
-                        value={aggFreq}
-                        onChange={(e) => setAggFreq(e.target.value as any)}
-                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
-                      >
-                        <option value="daily">Daily</option>
-                        <option value="weekly">Weekly (sum)</option>
-                        <option value="monthly">Monthly (sum)</option>
-                        <option value="rolling30">Last 30 Days Rolling Sum (YoY Demand Growth)</option>
-                      </select>
-
-                      <div className="mt-2 rounded-xl bg-white p-3 ring-1 ring-slate-200">
+                    {/* Right controls: Series toggles panel */}
+                    <div className="lg:w-[360px] lg:shrink-0">
+                      <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-xs font-semibold text-slate-700">Series toggles</div>
                           <label className="flex items-center gap-2 text-[12px] text-slate-700">
@@ -1332,6 +1401,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                             <span className="font-medium">Show Control Lines</span>
                           </label>
                         </div>
+
                         <div className="mt-2 grid grid-cols-2 gap-2 text-[12px] text-slate-700">
                           <label className="flex items-center gap-2">
                             <input
@@ -1402,22 +1472,26 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                         </div>
                       </div>
 
-                      <div className="mt-1 text-[11px] text-slate-500">
-                        Weekly/Monthly uses the same day-window for YoY and prior-period % (prevents partial-period distortion).
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Weekly/Monthly uses the same day-window for YoY and prior-period % (prevents partial-period
+                        distortion).
                       </div>
                     </div>
                   </div>
                 </div>
 
-                <div className="h-[340px]">
+                {/* ====== Taller chart area (fills card better) ====== */}
+                <div className="h-[360px] sm:h-[420px]">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={dailyForChartWithControl} margin={{ top: 10, right: 18, bottom: 10, left: 8 }}>
+                    <LineChart data={dailyForChartWithControl as any[]} margin={{ top: 10, right: 18, bottom: 10, left: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="label" tick={{ fontSize: 12 }} minTickGap={24} />
 
                       {anyTotalsShown ? (
                         <YAxis
                           yAxisId="left"
+                          domain={leftAxisDomain ?? ["auto", "auto"]}
+                          padding={{ top: 10, bottom: 10 }}
                           tick={{ fontSize: 12 }}
                           tickFormatter={(v) => fmtNum(asFiniteNumber(v) ?? null, 2)}
                         />
@@ -1427,6 +1501,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                         <YAxis
                           yAxisId="right"
                           orientation="right"
+                          domain={rightAxisDomain ?? ["auto", "auto"]}
+                          padding={{ top: 10, bottom: 10 }}
                           tick={{ fontSize: 12 }}
                           tickFormatter={(v) => fmtPct(asFiniteNumber(v) ?? null, 2)}
                         />
@@ -1437,22 +1513,17 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           const key = (item && (item.dataKey as string)) || (name as string);
                           const num = asFiniteNumber(v);
 
-                          if (key === "units") {
-                            return [`${fmtNum(num ?? null, 2)} units`, aggFreq === "daily" ? seriesLabel : "Total (current)"];
-                          }
+                          if (key === "units") return [`${fmtNum(num ?? null, 2)} units`, "Total Current"];
                           if (key === "prev_year_units") return [`${fmtNum(num ?? null, 2)} units`, "Total (previous year)"];
-
                           if (key === "yoy_pct") return [fmtPct(num ?? null, 2), "YoY %"];
                           if (key === "mom_pct") return [fmtPct(num ?? null, 2), aggFreq === "weekly" ? "WoW %" : "MoM %"];
 
-                          // Units control lines
                           if (key === "__mean_units") return [`${fmtNum(num ?? null, 2)} units`, "Mean"];
                           if (key === "__p1_units") return [`${fmtNum(num ?? null, 2)} units`, "+1σ"];
                           if (key === "__p2_units") return [`${fmtNum(num ?? null, 2)} units`, "+2σ"];
                           if (key === "__m1_units") return [`${fmtNum(num ?? null, 2)} units`, "-1σ"];
                           if (key === "__m2_units") return [`${fmtNum(num ?? null, 2)} units`, "-2σ"];
 
-                          // YoY% control lines
                           if (key === "__mean_yoy") return [fmtPct(num ?? null, 2), "Mean (YoY%)"];
                           if (key === "__p1_yoy") return [fmtPct(num ?? null, 2), "+1σ (YoY%)"];
                           if (key === "__p2_yoy") return [fmtPct(num ?? null, 2), "+2σ (YoY%)"];
@@ -1477,7 +1548,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           name="Total Current"
                           dot={false}
                           strokeWidth={2}
-                          stroke="#dc2626" // red
+                          stroke="#dc2626"
                         />
                       ) : null}
 
@@ -1489,7 +1560,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           name="Total (previous year)"
                           dot={false}
                           strokeWidth={2}
-                          stroke="#6b7280" // grey
+                          stroke="#6b7280"
                           connectNulls
                         />
                       ) : null}
@@ -1502,7 +1573,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           name="YoY %"
                           dot={false}
                           strokeWidth={2}
-                          stroke="#16a34a" // green
+                          stroke="#16a34a"
                           connectNulls
                         />
                       ) : null}
@@ -1515,12 +1586,12 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           name={aggFreq === "weekly" ? "WoW %" : "MoM %"}
                           dot={false}
                           strokeWidth={2}
-                          stroke="#dc2626" // red (existing request)
+                          stroke="#dc2626"
                           connectNulls
                         />
                       ) : null}
 
-                      {/* Control lines (color-coded per your preference) */}
+                      {/* Control lines (color-coded) */}
                       {showControlLines && controlStatsLeft ? (
                         <>
                           <Line yAxisId="left" type="monotone" dataKey="__mean_units" name="Mean" dot={false} strokeWidth={2} stroke="#000000" connectNulls />
@@ -1651,8 +1722,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
         </div>
 
         <div className="mt-6 text-xs text-slate-500">
-          Tip: Auto-fetch needs a small backend proxy because sources often block browser-to-site requests (CORS).
-          This UI expects an endpoint at /api/cea/daily that returns a {`{ date, total_mu }`} payload.
+          Tip: Auto-fetch needs a backend proxy because sources often block browser-to-site requests (CORS).
+          This UI expects an endpoint at /api/cea/daily that returns a {"{ date, total_mu }"} payload.
         </div>
       </div>
     </div>
